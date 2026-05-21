@@ -11,12 +11,65 @@ Layout:
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+
+
+def order_genes_by_group_contrast(
+    log_tpm: pd.DataFrame,
+    groups: Dict[str, List[str]],
+    group1: str,
+    group2: str,
+    genes: List[str],
+) -> List[str]:
+    """
+    Order genes for heatmap rows: high in group1 (top) → similar (middle) → high in group2 (bottom).
+
+    Uses mean log₂(TPM + 1) per group; sort key is group1_mean − group2_mean.
+    """
+    samples_g1 = [s for s in groups.get(group1, []) if s in log_tpm.columns]
+    samples_g2 = [s for s in groups.get(group2, []) if s in log_tpm.columns]
+    if not samples_g1 or not samples_g2:
+        return genes
+
+    present = [g for g in genes if g in log_tpm.index]
+    if not present:
+        return genes
+
+    mean_g1 = log_tpm.loc[present, samples_g1].mean(axis=1)
+    mean_g2 = log_tpm.loc[present, samples_g2].mean(axis=1)
+    score = mean_g1 - mean_g2
+    ordered = score.sort_values(ascending=False).index.tolist()
+
+    missing = [g for g in genes if g not in log_tpm.index]
+    return ordered + missing
+
+
+def order_gene_list_for_heatmap(
+    tpm_df: pd.DataFrame,
+    groups: Dict[str, List[str]],
+    gene_list: List[str],
+    contrast_groups: Optional[Tuple[str, str]] = None,
+) -> List[str]:
+    """Reorder a user gene list using group contrast (or return unchanged if no contrast pair)."""
+    idx_upper = {g.upper(): g for g in tpm_df.index}
+    matched = [idx_upper[g.upper()] for g in gene_list if g.upper() in idx_upper]
+    if not matched:
+        return gene_list
+
+    log_tpm = np.log2(tpm_df.loc[matched].astype(float) + 1)
+    if contrast_groups:
+        g1, g2 = contrast_groups
+        matched = order_genes_by_group_contrast(log_tpm, groups, g1, g2, matched)
+
+    canon_to_input = {idx_upper[g.upper()]: g for g in gene_list if g.upper() in idx_upper}
+    ordered = [canon_to_input[m] for m in matched]
+    not_found = [g for g in gene_list if g.upper() not in idx_upper]
+    return ordered + not_found
 
 
 def build_heatmap(

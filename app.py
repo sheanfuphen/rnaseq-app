@@ -108,7 +108,7 @@ from src.data_loader  import load_combined_tsv, validate_counts
 from src.dge          import run_dge_all_pairs
 from src.pca          import compute_pca, plot_pca_2d, plot_pca_3d
 from src.volcano      import plot_volcano
-from src.heatmap      import build_heatmap
+from src.heatmap      import build_heatmap, order_gene_list_for_heatmap
 from src.go_enrichment import run_enrichment, plot_go_bars, plot_go_dots, GO_LIBRARIES
 
 
@@ -550,16 +550,51 @@ with tab_heatmap:
         if selected_genes:
             st.caption(f"**{len(selected_genes)}** unique gene(s) selected.")
 
-        # ── Build initial gene order in session state ─────────────────────────
-        # Only reset order when gene selection changes
-        gene_selection_key = tuple(sorted(selected_genes))
+        # ── Gene row ordering by group contrast ───────────────────────────────
+        group_names = [k for k, v in groups_dict.items() if v]
+        contrast_pair = None
+        if len(group_names) >= 2:
+            st.markdown("**📐 Gene row order** — cluster by expression contrast between two groups:")
+            c1, c2 = st.columns(2)
+            with c1:
+                hm_group1 = st.selectbox(
+                    "Higher at top of heatmap",
+                    options=group_names,
+                    index=0,
+                    key="hm_contrast_g1",
+                )
+            with c2:
+                other = [g for g in group_names if g != hm_group1]
+                hm_group2 = st.selectbox(
+                    "Higher at bottom of heatmap",
+                    options=other if other else group_names,
+                    index=0,
+                    key="hm_contrast_g2",
+                )
+            if hm_group1 != hm_group2:
+                contrast_pair = (hm_group1, hm_group2)
+                st.caption(
+                    f"Genes are sorted by mean log₂(TPM+1): enriched in **{hm_group1}** at the top, "
+                    f"enriched in **{hm_group2}** at the bottom, and similar between groups in the middle."
+                )
+            else:
+                st.warning("Pick two different groups for contrast ordering.")
+
+        contrast_key = contrast_pair
+        gene_selection_key = (tuple(sorted(selected_genes)), contrast_key)
         if st.session_state.get("_heatmap_gene_key") != gene_selection_key:
-            st.session_state["_heatmap_gene_key"]   = gene_selection_key
-            st.session_state["_heatmap_gene_order"] = sorted(selected_genes)
+            st.session_state["_heatmap_gene_key"] = gene_selection_key
+            gene_list = list(selected_genes)
+            if contrast_pair:
+                st.session_state["_heatmap_gene_order"] = order_gene_list_for_heatmap(
+                    tpm_df, groups_dict, gene_list, contrast_pair,
+                )
+            else:
+                st.session_state["_heatmap_gene_order"] = gene_list
 
         # ── Gene reordering UI ────────────────────────────────────────────────
         if selected_genes:
-            st.markdown("**🔀 Reorder genes** — select a gene and move it up or down:")
+            st.markdown("**🔀 Manual reorder** (optional) — select a gene and move it up or down:")
 
             gene_order = st.session_state["_heatmap_gene_order"]
 
@@ -602,7 +637,9 @@ with tab_heatmap:
         if st.button("🔥 Generate Heatmap", type="primary",
                      disabled=len(selected_genes) == 0):
             try:
-                gene_order = st.session_state.get("_heatmap_gene_order", sorted(selected_genes))
+                gene_order = st.session_state.get(
+                    "_heatmap_gene_order", list(selected_genes),
+                )
                 fig = build_heatmap(
                     tpm_df, sample_meta, gene_order,
                     colors_dict, groups_dict,
