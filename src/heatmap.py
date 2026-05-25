@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Literal, Optional, Tuple
 
-ValueMode = Literal["zscore", "tpm"]
+ValueMode = Literal["zscore", "log2_tpm", "tpm"]
 
 import numpy as np
 import pandas as pd
@@ -92,6 +92,31 @@ def order_gene_list_for_heatmap(
     return ordered + not_found
 
 
+def genes_in_csv_order(
+    csv_order: List[str],
+    selected_genes: List[str],
+    manual_genes: Optional[List[str]] = None,
+) -> List[str]:
+    """Preserve CSV row order; append manual genes not already listed."""
+    selected_upper = {g.upper() for g in selected_genes}
+    ordered: List[str] = []
+    seen: set = set()
+    for g in csv_order:
+        gu = g.upper()
+        if gu in selected_upper and gu not in seen:
+            seen.add(gu)
+            ordered.append(gu)
+    for g in manual_genes or []:
+        gu = g.upper().strip()
+        if gu and gu in selected_upper and gu not in seen:
+            seen.add(gu)
+            ordered.append(gu)
+    for g in sorted(selected_upper):
+        if g not in seen:
+            ordered.append(g)
+    return ordered
+
+
 def build_heatmap(
     tpm_df: pd.DataFrame,
     sample_meta: pd.DataFrame,
@@ -108,7 +133,7 @@ def build_heatmap(
     gene_list   : genes to display (case-insensitive matching against tpm_df.index)
     group_colors: {group_name: hex_color}  — must match PCA colours
     groups      : {group_name: [sample_key, ...]}  — used for column ordering
-    value_mode  : "zscore" for per-gene Z-scored log₂(TPM+1), or "tpm" for raw TPM
+    value_mode  : "zscore" | "log2_tpm" | "tpm" for cell colours and colorbar
 
     Returns
     -------
@@ -159,6 +184,13 @@ def build_heatmap(
             vmax = vmin + 1.0
         colorscale = "Viridis"
         colorbar_title = "TPM"
+    elif value_mode == "log2_tpm":
+        vmin = float(log_tpm.values.min()) if log_tpm.size else 0.0
+        vmax = float(log_tpm.values.max()) if log_tpm.size else 1.0
+        if vmax <= vmin:
+            vmax = vmin + 1.0
+        colorscale = "Viridis"
+        colorbar_title = "log₂(TPM+1)"
     else:
         z_abs = float(np.nanmax(np.abs(z.values))) if z.size else 1.0
         z_abs = max(z_abs, 0.01)
@@ -176,7 +208,12 @@ def build_heatmap(
             log_val = float(log_tpm.loc[gene, samp])
             zval    = float(z.loc[gene, samp])
             grp     = sample_meta.loc[samp, "group"] if samp in sample_meta.index else "?"
-            cell_val = raw_tpm if value_mode == "tpm" else zval
+            if value_mode == "tpm":
+                cell_val = raw_tpm
+            elif value_mode == "log2_tpm":
+                cell_val = log_val
+            else:
+                cell_val = zval
             fig.add_shape(
                 type="rect",
                 x0=si - 0.5,

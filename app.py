@@ -108,7 +108,11 @@ from src.data_loader  import load_combined_tsv, validate_counts
 from src.dge          import run_dge_all_pairs
 from src.pca          import compute_pca, plot_pca_2d, plot_pca_3d
 from src.volcano      import plot_volcano
-from src.heatmap      import build_heatmap, order_gene_list_for_heatmap
+from src.heatmap      import (
+    build_heatmap,
+    genes_in_csv_order,
+    order_gene_list_for_heatmap,
+)
 from src.go_enrichment import run_enrichment, plot_go_bars, plot_go_dots, GO_LIBRARIES
 
 
@@ -531,6 +535,7 @@ with tab_heatmap:
         gene_list_dir.mkdir(exist_ok=True)
         csv_files = sorted(gene_list_dir.glob("*.csv"))
         selected_genes: set = set()
+        csv_order_genes: list = []
 
         if csv_files:
             chosen_csvs = st.multiselect(
@@ -542,14 +547,17 @@ with tab_heatmap:
                 try:
                     gdf = pd.read_csv(gene_list_dir / f"{csv_name}.csv")
                     col = gdf.columns[0]
-                    selected_genes.update(
-                        gdf[col].dropna().astype(str).str.strip().str.upper().tolist()
-                    )
+                    for gene in gdf[col].dropna().astype(str).str.strip().str.upper().tolist():
+                        if gene:
+                            selected_genes.add(gene)
+                            if gene not in csv_order_genes:
+                                csv_order_genes.append(gene)
                 except Exception as e:
                     st.warning(f"Could not read {csv_name}.csv: {e}")
         else:
             st.caption("No CSVs found in gene_lists/. Add gene list CSVs there to use the dropdown.")
 
+        manual_genes: list = []
         manual = st.text_input(
             "✏️ Additional genes (comma-separated, case-insensitive)",
             placeholder="e.g.  ACTB, GAPDH, TP53",
@@ -559,14 +567,39 @@ with tab_heatmap:
                 g = g.strip().upper()
                 if g:
                     selected_genes.add(g)
+                    manual_genes.append(g)
 
         if selected_genes:
             st.caption(f"**{len(selected_genes)}** unique gene(s) selected.")
 
+        hm_csv_order = st.toggle(
+            "Keep gene order from CSV file(s)",
+            key="hm_csv_order_toggle",
+            help="Rows follow the order genes appear in your selected CSV(s), top to bottom.",
+        )
+        hm_log_tpm = st.toggle(
+            "Show log₂(TPM+1) (instead of per-gene Z-scores)",
+            key="hm_log_tpm_toggle",
+            help="Colour cells by log-transformed TPM without row-wise Z-scoring.",
+        )
+        hm_use_tpm = st.toggle(
+            "Show raw TPM",
+            key="hm_raw_tpm_toggle",
+            help="Colour cells by raw TPM values (overrides log₂ toggle when both are on).",
+        )
+        if hm_use_tpm:
+            hm_value_mode = "tpm"
+        elif hm_log_tpm:
+            hm_value_mode = "log2_tpm"
+        else:
+            hm_value_mode = "zscore"
+
         # ── Gene row ordering by group contrast ───────────────────────────────
         group_names = [k for k, v in groups_dict.items() if v]
         contrast_pair = None
-        if len(group_names) >= 2:
+        if hm_csv_order:
+            st.caption("Gene order follows your CSV row order (contrast sorting is off).")
+        elif len(group_names) >= 2:
             st.markdown("**📐 Gene row order** — cluster by expression contrast between two groups:")
             c1, c2 = st.columns(2)
             with c1:
@@ -594,11 +627,19 @@ with tab_heatmap:
                 st.warning("Pick two different groups for contrast ordering.")
 
         contrast_key = contrast_pair
-        gene_selection_key = (tuple(sorted(selected_genes)), contrast_key)
+        gene_selection_key = (
+            tuple(sorted(selected_genes)),
+            contrast_key,
+            hm_csv_order,
+        )
         if st.session_state.get("_heatmap_gene_key") != gene_selection_key:
             st.session_state["_heatmap_gene_key"] = gene_selection_key
             gene_list = list(selected_genes)
-            if contrast_pair:
+            if hm_csv_order:
+                st.session_state["_heatmap_gene_order"] = genes_in_csv_order(
+                    csv_order_genes, gene_list, manual_genes,
+                )
+            elif contrast_pair:
                 st.session_state["_heatmap_gene_order"] = order_gene_list_for_heatmap(
                     tpm_df, groups_dict, gene_list, contrast_pair,
                 )
@@ -647,13 +688,6 @@ with tab_heatmap:
                     st.session_state["_heatmap_gene_order"] = gene_order
                     st.rerun()
 
-        hm_use_tpm = st.toggle(
-            "Show raw TPM (instead of per-gene Z-scores on log₂ TPM)",
-            key="hm_value_toggle",
-            help="Z-score mode scales each gene row; TPM mode colours cells by raw TPM.",
-        )
-        hm_value_mode = "tpm" if hm_use_tpm else "zscore"
-
         if st.button("🔥 Generate Heatmap", type="primary",
                      disabled=len(selected_genes) == 0):
             try:
@@ -666,14 +700,14 @@ with tab_heatmap:
                     value_mode=hm_value_mode,
                 )
                 st.session_state["_heatmap_fig"] = fig
-                st.session_state["_heatmap_value_mode"] = hm_value_mode
+                st.session_state["_heatmap_settings"] = (hm_value_mode, hm_csv_order)
             except Exception as e:
                 st.error(f"Heatmap error: {e}")
 
         # Keep the figure visible after reordering without re-clicking generate
         if "_heatmap_fig" in st.session_state and selected_genes:
-            if st.session_state.get("_heatmap_value_mode") != hm_value_mode:
-                st.info("Value mode changed — click **Generate Heatmap** to update the plot.")
+            if st.session_state.get("_heatmap_settings") != (hm_value_mode, hm_csv_order):
+                st.info("Display options changed — click **Generate Heatmap** to update the plot.")
             fig = st.session_state["_heatmap_fig"]
             st.plotly_chart(fig, use_container_width=True)
             export_buttons(fig, "heatmap", include_pdf=True)
