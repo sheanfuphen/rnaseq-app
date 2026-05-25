@@ -112,7 +112,7 @@ from src.heatmap      import build_heatmap, order_gene_list_for_heatmap
 from src.go_enrichment import run_enrichment, plot_go_bars, plot_go_dots, GO_LIBRARIES
 
 
-def export_buttons(fig, filename_stem: str):
+def export_buttons(fig, filename_stem: str, include_pdf: bool = False):
     """Render PNG and SVG download buttons for a Plotly figure."""
     try:
         png_bytes = fig.to_image(format="png", scale=3)
@@ -137,6 +137,19 @@ def export_buttons(fig, filename_stem: str):
         )
     except Exception:
         pass
+
+    if include_pdf:
+        try:
+            pdf_bytes = fig.to_image(format="pdf", scale=3)
+            st.download_button(
+                "⬇ Download PDF",
+                data=pdf_bytes,
+                file_name=f"{filename_stem}.pdf",
+                mime="application/pdf",
+                key=f"dl_pdf_{filename_stem}",
+            )
+        except Exception:
+            st.caption("⚠️ PDF export unavailable — run `pip install kaleido` to enable.")
 
 # ── Session state defaults ────────────────────────────────────────────────────
 def _init(key, val):
@@ -634,6 +647,13 @@ with tab_heatmap:
                     st.session_state["_heatmap_gene_order"] = gene_order
                     st.rerun()
 
+        hm_use_tpm = st.toggle(
+            "Show raw TPM (instead of per-gene Z-scores on log₂ TPM)",
+            key="hm_value_toggle",
+            help="Z-score mode scales each gene row; TPM mode colours cells by raw TPM.",
+        )
+        hm_value_mode = "tpm" if hm_use_tpm else "zscore"
+
         if st.button("🔥 Generate Heatmap", type="primary",
                      disabled=len(selected_genes) == 0):
             try:
@@ -643,16 +663,20 @@ with tab_heatmap:
                 fig = build_heatmap(
                     tpm_df, sample_meta, gene_order,
                     colors_dict, groups_dict,
+                    value_mode=hm_value_mode,
                 )
                 st.session_state["_heatmap_fig"] = fig
+                st.session_state["_heatmap_value_mode"] = hm_value_mode
             except Exception as e:
                 st.error(f"Heatmap error: {e}")
 
         # Keep the figure visible after reordering without re-clicking generate
         if "_heatmap_fig" in st.session_state and selected_genes:
+            if st.session_state.get("_heatmap_value_mode") != hm_value_mode:
+                st.info("Value mode changed — click **Generate Heatmap** to update the plot.")
             fig = st.session_state["_heatmap_fig"]
             st.plotly_chart(fig, use_container_width=True)
-            export_buttons(fig, "heatmap")
+            export_buttons(fig, "heatmap", include_pdf=True)
 
 
 # ── GO Enrichment ─────────────────────────────────────────────────────────────

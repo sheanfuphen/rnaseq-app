@@ -1,7 +1,7 @@
 """
 src/heatmap.py
 ──────────────
-Interactive heatmap built on log2(TPM + 1) Z-scores.
+Interactive heatmap of log₂(TPM+1) Z-scores or raw TPM.
 
 Layout:
   Y axis  — genes (labels draggable via Plotly pan mode)
@@ -11,12 +11,32 @@ Layout:
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
+
+ValueMode = Literal["zscore", "tpm"]
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.colors import sample_colorscale
 from plotly.subplots import make_subplots
+
+_FONT = dict(family="Arial, sans-serif", size=12, color="#111111")
+
+
+def _value_to_fillcolor(
+    value: float,
+    vmin: float,
+    vmax: float,
+    colorscale: str = "RdBu_r",
+) -> str:
+    """Map a numeric value to a fill colour along a colorscale."""
+    if vmax <= vmin:
+        t = 0.5
+    else:
+        t = (float(value) - vmin) / (vmax - vmin)
+    t = max(0.0, min(1.0, t))
+    return sample_colorscale(colorscale, [t])[0]
 
 
 def order_genes_by_group_contrast(
@@ -78,6 +98,7 @@ def build_heatmap(
     gene_list: List[str],
     group_colors: Dict[str, str],
     groups: Dict[str, List[str]],
+    value_mode: ValueMode = "zscore",
 ) -> go.Figure:
     """
     Parameters
@@ -87,6 +108,7 @@ def build_heatmap(
     gene_list   : genes to display (case-insensitive matching against tpm_df.index)
     group_colors: {group_name: hex_color}  — must match PCA colours
     groups      : {group_name: [sample_key, ...]}  — used for column ordering
+    value_mode  : "zscore" for per-gene Z-scored log₂(TPM+1), or "tpm" for raw TPM
 
     Returns
     -------
@@ -130,42 +152,101 @@ def build_heatmap(
         shared_xaxes=True,
     )
 
-    # ── Hover text ────────────────────────────────────────────────────────────
-    hover = []
-    for gene in matched:
-        row = []
-        for samp in ordered_samples:
-            grp   = sample_meta.loc[samp, "group"] if samp in sample_meta.index else "?"
-            raw   = round(float(sub.loc[gene, samp]), 2)
-            zval  = round(float(z.loc[gene, samp]), 3)
-            row.append(
+    if value_mode == "tpm":
+        vmin = float(sub.values.min()) if sub.size else 0.0
+        vmax = float(sub.values.max()) if sub.size else 1.0
+        if vmax <= vmin:
+            vmax = vmin + 1.0
+        colorscale = "Viridis"
+        colorbar_title = "TPM"
+    else:
+        z_abs = float(np.nanmax(np.abs(z.values))) if z.size else 1.0
+        z_abs = max(z_abs, 0.01)
+        vmin, vmax = -z_abs, z_abs
+        colorscale = "RdBu_r"
+        colorbar_title = "Z-score<br>(log₂ TPM)"
+
+    # ── One SVG rectangle per cell (editable in Illustrator) ─────────────────
+    # Plotly Heatmap exports as a single embedded image in SVG; shapes export
+    # as separate <path> elements under individual shape-group nodes.
+    hover_x, hover_y, hover_text = [], [], []
+    for gi, gene in enumerate(matched):
+        for si, samp in enumerate(ordered_samples):
+            raw_tpm = float(sub.loc[gene, samp])
+            log_val = float(log_tpm.loc[gene, samp])
+            zval    = float(z.loc[gene, samp])
+            grp     = sample_meta.loc[samp, "group"] if samp in sample_meta.index else "?"
+            cell_val = raw_tpm if value_mode == "tpm" else zval
+            fig.add_shape(
+                type="rect",
+                x0=si - 0.5,
+                x1=si + 0.5,
+                y0=gi - 0.5,
+                y1=gi + 0.5,
+                fillcolor=_value_to_fillcolor(cell_val, vmin, vmax, colorscale),
+                line=dict(width=0),
+                layer="below",
+                row=1,
+                col=1,
+            )
+            hover_x.append(si)
+            hover_y.append(gi)
+            hover_text.append(
                 f"<b>{gene}</b><br>"
                 f"Sample: {samp}<br>"
                 f"Group: {grp}<br>"
-                f"TPM: {raw}<br>"
-                f"Z-score: {zval}"
+                f"TPM: {raw_tpm:.2f}<br>"
+                f"log₂(TPM+1): {log_val:.3f}<br>"
+                f"Z-score: {zval:.3f}"
             )
-        hover.append(row)
 
-    # ── Heatmap trace ─────────────────────────────────────────────────────────
+    # Invisible markers for tooltips only (no line segments in SVG export)
     fig.add_trace(
-        go.Heatmap(
-            z=z.values,
-            x=ordered_samples,
-            y=matched,
-            text=hover,
+        go.Scatter(
+            x=hover_x,
+            y=hover_y,
+            mode="markers",
+            marker=dict(size=14, opacity=0, symbol="square"),
+            line=dict(width=0, color="rgba(0,0,0,0)"),
+            text=hover_text,
             hoverinfo="text",
-            colorscale="RdBu_r",
-            zmid=0,
-            colorbar=dict(
-                title=dict(text="Z-score<br>(log₂ TPM)", side="right"),
-                thickness=12,
-                len=0.9,
-                y=0.5,
-                yanchor="middle",
-            ),
+            showlegend=False,
         ),
-        row=1, col=1,
+        row=1,
+        col=1,
+    )
+
+    # Invisible scale trace for the colour bar only
+    fig.add_trace(
+        go.Scatter(
+            x=[None],
+            y=[None],
+            mode="markers",
+            marker=dict(
+                colorscale=colorscale,
+                cmin=vmin,
+                cmax=vmax,
+                color=[0],
+                showscale=True,
+                colorbar=dict(
+                    title=dict(
+                        text=colorbar_title,
+                        side="right",
+                        font=_FONT,
+                    ),
+                    tickfont=_FONT,
+                    thickness=12,
+                    len=0.9,
+                    y=0.5,
+                    yanchor="middle",
+                    outlinewidth=0,
+                ),
+            ),
+            hoverinfo="skip",
+            showlegend=False,
+        ),
+        row=1,
+        col=1,
     )
 
     # ── Group annotation bar ──────────────────────────────────────────────────
@@ -182,7 +263,7 @@ def build_heatmap(
             go.Bar(
                 x=[samp],
                 y=[1],
-                marker_color=color,
+                marker=dict(color=color, line=dict(width=0)),
                 name=grp,
                 showlegend=show_legend,
                 legendgroup=grp,
@@ -201,41 +282,74 @@ def build_heatmap(
         barmode="stack",
         plot_bgcolor="white",
         paper_bgcolor="white",
-        font=dict(family="DM Sans, sans-serif", size=11, color="#111111"),
+        font=_FONT,
         legend=dict(
-            title=dict(
-                text="Group",
-                font=dict(color="#111111", size=12),
-                side="top",
-            ),
+            title=dict(text="Group", font=_FONT, side="top"),
             orientation="v",
-            x=1.08, y=0.97,
-            font=dict(color="#111111"),
+            x=1.08,
+            y=0.97,
+            font=_FONT,
         ),
         margin=dict(l=130, r=120, t=40, b=20),
         dragmode="pan",
     )
 
-    # Heatmap axes
+    # Heatmap axes (numeric coordinates so each cell is a unit square)
     fig.update_xaxes(
-        tickangle=-40, tickfont=dict(size=10, color="#111111"),
-        showgrid=False, row=1, col=1,
+        range=[-0.5, n_samples - 0.5],
+        tickvals=list(range(n_samples)),
+        ticktext=ordered_samples,
+        tickangle=-40,
+        tickfont=_FONT,
+        showgrid=False,
+        zeroline=False,
+        showline=False,
+        mirror=False,
+        row=1,
+        col=1,
     )
     fig.update_yaxes(
+        range=[-0.5, n_genes - 0.5],
+        tickvals=list(range(n_genes)),
+        ticktext=matched,
         title_text="Gene",
-        tickfont=dict(size=10, color="#111111"),
-        title_font=dict(color="#111111"),
+        tickfont=_FONT,
+        title_font=_FONT,
         autorange="reversed",
         fixedrange=False,
-        showgrid=False, row=1, col=1,
+        showgrid=False,
+        zeroline=False,
+        showline=False,
+        mirror=False,
+        row=1,
+        col=1,
     )
 
     # Annotation bar axes
-    fig.update_xaxes(showticklabels=False, showgrid=False, row=2, col=1)
-    fig.update_yaxes(
-        showticklabels=False, showgrid=False,
-        range=[0, 1], fixedrange=True, row=2, col=1,
+    fig.update_xaxes(
+        showticklabels=False,
+        showgrid=False,
+        zeroline=False,
+        showline=False,
+        mirror=False,
+        row=2,
+        col=1,
     )
+    fig.update_yaxes(
+        showticklabels=False,
+        showgrid=False,
+        zeroline=False,
+        showline=False,
+        mirror=False,
+        range=[0, 1],
+        fixedrange=True,
+        row=2,
+        col=1,
+    )
+
+    # Disable axis baselines on every subplot (avoids lines at x=0 / y=0 in SVG)
+    fig.update_xaxes(zeroline=False, showline=False, mirror=False, showgrid=False)
+    fig.update_yaxes(zeroline=False, showline=False, mirror=False, showgrid=False)
 
     # ── Warning for unmatched genes ───────────────────────────────────────────
     if missing:
@@ -245,7 +359,7 @@ def build_heatmap(
             xref="paper", yref="paper",
             x=0, y=-0.03,
             showarrow=False,
-            font=dict(size=10, color="#cc0033"),
+            font=dict(family="Arial, sans-serif", size=12, color="#cc0033"),
             xanchor="left",
         )
 
