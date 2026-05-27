@@ -116,6 +116,55 @@ from src.heatmap      import (
 from src.go_enrichment import run_enrichment, plot_go_bars, plot_go_dots, GO_LIBRARIES
 
 
+def group_include_checkboxes(
+    groups_dict: dict,
+    key_prefix: str,
+    label: str = "Include groups in plot",
+) -> list:
+    """One checkbox per group; return names of groups to include."""
+    group_names = [k for k, v in groups_dict.items() if v]
+    if not group_names:
+        return []
+    st.markdown(f"**{label}**")
+    cols = st.columns(min(len(group_names), 6))
+    selected = []
+    for i, gname in enumerate(group_names):
+        with cols[i % len(cols)]:
+            if st.checkbox(gname, value=True, key=f"{key_prefix}_grp_{gname}"):
+                selected.append(gname)
+    return selected
+
+
+def subset_plot_data(
+    tpm_df: pd.DataFrame,
+    sample_meta: pd.DataFrame,
+    groups_dict: dict,
+    colors_dict: dict,
+    selected_groups: list,
+):
+    """Keep only samples and groups selected for PCA / heatmap."""
+    if not selected_groups:
+        empty_meta = sample_meta.iloc[0:0].copy()
+        return tpm_df.iloc[:, 0:0], empty_meta, {}, {}
+
+    filtered_groups = {k: v for k, v in groups_dict.items() if k in selected_groups}
+    ordered_samples: list = []
+    seen: set = set()
+    for gname, samps in groups_dict.items():
+        if gname not in filtered_groups:
+            continue
+        for s in samps:
+            if s in tpm_df.columns and s not in seen:
+                seen.add(s)
+                ordered_samples.append(s)
+
+    filtered_tpm = tpm_df[ordered_samples]
+    filtered_meta = sample_meta.loc[sample_meta.index.isin(ordered_samples)].copy()
+    filtered_meta = filtered_meta[filtered_meta["group"].isin(selected_groups)]
+    filtered_colors = {k: colors_dict[k] for k in selected_groups if k in colors_dict}
+    return filtered_tpm, filtered_meta, filtered_groups, filtered_colors
+
+
 def export_buttons(fig, filename_stem: str, include_pdf: bool = False):
     """Render PNG and SVG download buttons for a Plotly figure."""
     try:
@@ -485,6 +534,15 @@ with tab_pca:
         tpm_df      = st.session_state["_tpm_df"]
         sample_meta = st.session_state["_sample_meta"]
         colors_dict = st.session_state.get("_colors_dict", {}).copy()
+        groups_dict = st.session_state.get("_groups_dict", {})
+
+        pca_selected = group_include_checkboxes(groups_dict, "pca")
+        if not pca_selected:
+            st.warning("Select at least one group to include in the PCA.")
+        else:
+            tpm_df, sample_meta, _, colors_dict = subset_plot_data(
+                tpm_df, sample_meta, groups_dict, colors_dict, pca_selected,
+            )
 
         col_w, col_h = st.columns(2)
         pca_w = col_w.slider("Plot width (px)",  400, 1400, 850, 50)
@@ -504,213 +562,234 @@ with tab_pca:
                     if hex_input != default_color:
                         st.caption("⚠️ Invalid hex, using default.")
 
-        try:
-            coords_2d, coords_3d, explained = compute_pca(tpm_df)
-            st.markdown("#### 2D PCA")
-            fig2d = plot_pca_2d(coords_2d, sample_meta, explained, pca_colors,
-                                width=pca_w, height=pca_h)
-            st.plotly_chart(fig2d, use_container_width=False)
-            export_buttons(fig2d, "PCA_2D")
+        if pca_selected and len(tpm_df.columns) >= 2:
+            try:
+                coords_2d, coords_3d, explained = compute_pca(tpm_df)
+                st.markdown("#### 2D PCA")
+                fig2d = plot_pca_2d(coords_2d, sample_meta, explained, pca_colors,
+                                    width=pca_w, height=pca_h)
+                st.plotly_chart(fig2d, use_container_width=False)
+                export_buttons(fig2d, "PCA_2D")
 
-            st.markdown("#### 3D PCA")
-            fig3d = plot_pca_3d(coords_3d, sample_meta, explained, pca_colors,
-                                width=pca_w, height=pca_h)
-            st.plotly_chart(fig3d, use_container_width=False)
-            export_buttons(fig3d, "PCA_3D")
-        except Exception as e:
-            st.error(f"PCA failed: {e}")
+                st.markdown("#### 3D PCA")
+                fig3d = plot_pca_3d(coords_3d, sample_meta, explained, pca_colors,
+                                    width=pca_w, height=pca_h)
+                st.plotly_chart(fig3d, use_container_width=False)
+                export_buttons(fig3d, "PCA_3D")
+            except Exception as e:
+                st.error(f"PCA failed: {e}")
+        elif pca_selected:
+            st.warning("PCA needs at least 2 samples in the selected groups.")
 
 # ── Heatmap ───────────────────────────────────────────────────────────────────
 with tab_heatmap:
     if "_tpm_df" not in st.session_state:
         st.info("Run DGE analysis (or compute PCA) first so TPM data is available.")
     else:
-        tpm_df      = st.session_state["_tpm_df"]
-        sample_meta = st.session_state["_sample_meta"]
-        colors_dict = st.session_state.get("_colors_dict", {})
-        groups_dict = st.session_state.get("_groups_dict", {})
+        tpm_df_full      = st.session_state["_tpm_df"]
+        sample_meta_full = st.session_state["_sample_meta"]
+        colors_dict_full = st.session_state.get("_colors_dict", {})
+        groups_dict_full = st.session_state.get("_groups_dict", {})
 
-        # ── Gene list CSVs ────────────────────────────────────────────────────
-        gene_list_dir = Path("gene_lists")
-        gene_list_dir.mkdir(exist_ok=True)
-        csv_files = sorted(gene_list_dir.glob("*.csv"))
-        selected_genes: set = set()
-        csv_order_genes: list = []
-
-        if csv_files:
-            chosen_csvs = st.multiselect(
-                "📋 Select gene list CSV(s)",
-                options=[f.stem for f in csv_files],
-                help="Place CSV files in the gene_lists/ folder. First column = gene names.",
+        hm_selected = group_include_checkboxes(
+            groups_dict_full, "hm", label="Include groups in heatmap",
+        )
+        hm_active = False
+        if not hm_selected:
+            st.warning("Select at least one group to include in the heatmap.")
+        else:
+            tpm_df, sample_meta, groups_dict, colors_dict = subset_plot_data(
+                tpm_df_full, sample_meta_full, groups_dict_full, colors_dict_full, hm_selected,
             )
-            for csv_name in chosen_csvs:
-                try:
-                    gdf = pd.read_csv(gene_list_dir / f"{csv_name}.csv")
-                    col = gdf.columns[0]
-                    for gene in gdf[col].dropna().astype(str).str.strip().str.upper().tolist():
-                        if gene:
-                            selected_genes.add(gene)
-                            if gene not in csv_order_genes:
-                                csv_order_genes.append(gene)
-                except Exception as e:
-                    st.warning(f"Could not read {csv_name}.csv: {e}")
-        else:
-            st.caption("No CSVs found in gene_lists/. Add gene list CSVs there to use the dropdown.")
+            hm_active = tpm_df.shape[1] > 0
+            if not hm_active:
+                st.warning("No samples found for the selected groups.")
 
-        manual_genes: list = []
-        manual = st.text_input(
-            "✏️ Additional genes (comma-separated, case-insensitive)",
-            placeholder="e.g.  ACTB, GAPDH, TP53",
-        )
-        if manual:
-            for g in manual.split(","):
-                g = g.strip().upper()
-                if g:
-                    selected_genes.add(g)
-                    manual_genes.append(g)
+        if hm_active:
+            # ── Gene list CSVs ────────────────────────────────────────────────────
+            gene_list_dir = Path("gene_lists")
+            gene_list_dir.mkdir(exist_ok=True)
+            csv_files = sorted(gene_list_dir.glob("*.csv"))
+            selected_genes: set = set()
+            csv_order_genes: list = []
 
-        if selected_genes:
-            st.caption(f"**{len(selected_genes)}** unique gene(s) selected.")
-
-        hm_csv_order = st.toggle(
-            "Keep gene order from CSV file(s)",
-            key="hm_csv_order_toggle",
-            help="Rows follow the order genes appear in your selected CSV(s), top to bottom.",
-        )
-        hm_log_tpm = st.toggle(
-            "Show log₂(TPM+1) (instead of per-gene Z-scores)",
-            key="hm_log_tpm_toggle",
-            help="Colour cells by log-transformed TPM without row-wise Z-scoring.",
-        )
-        hm_use_tpm = st.toggle(
-            "Show raw TPM",
-            key="hm_raw_tpm_toggle",
-            help="Colour cells by raw TPM values (overrides log₂ toggle when both are on).",
-        )
-        if hm_use_tpm:
-            hm_value_mode = "tpm"
-        elif hm_log_tpm:
-            hm_value_mode = "log2_tpm"
-        else:
-            hm_value_mode = "zscore"
-
-        # ── Gene row ordering by group contrast ───────────────────────────────
-        group_names = [k for k, v in groups_dict.items() if v]
-        contrast_pair = None
-        if hm_csv_order:
-            st.caption("Gene order follows your CSV row order (contrast sorting is off).")
-        elif len(group_names) >= 2:
-            st.markdown("**📐 Gene row order** — cluster by expression contrast between two groups:")
-            c1, c2 = st.columns(2)
-            with c1:
-                hm_group1 = st.selectbox(
-                    "Higher at top of heatmap",
-                    options=group_names,
-                    index=0,
-                    key="hm_contrast_g1",
+            if csv_files:
+                chosen_csvs = st.multiselect(
+                    "📋 Select gene list CSV(s)",
+                    options=[f.stem for f in csv_files],
+                    help="Place CSV files in the gene_lists/ folder. First column = gene names.",
                 )
-            with c2:
-                other = [g for g in group_names if g != hm_group1]
-                hm_group2 = st.selectbox(
-                    "Higher at bottom of heatmap",
-                    options=other if other else group_names,
-                    index=0,
-                    key="hm_contrast_g2",
-                )
-            if hm_group1 != hm_group2:
-                contrast_pair = (hm_group1, hm_group2)
-                st.caption(
-                    f"Genes are sorted by mean log₂(TPM+1): enriched in **{hm_group1}** at the top, "
-                    f"enriched in **{hm_group2}** at the bottom, and similar between groups in the middle."
-                )
+                for csv_name in chosen_csvs:
+                    try:
+                        gdf = pd.read_csv(gene_list_dir / f"{csv_name}.csv")
+                        col = gdf.columns[0]
+                        for gene in gdf[col].dropna().astype(str).str.strip().str.upper().tolist():
+                            if gene:
+                                selected_genes.add(gene)
+                                if gene not in csv_order_genes:
+                                    csv_order_genes.append(gene)
+                    except Exception as e:
+                        st.warning(f"Could not read {csv_name}.csv: {e}")
             else:
-                st.warning("Pick two different groups for contrast ordering.")
+                st.caption("No CSVs found in gene_lists/. Add gene list CSVs there to use the dropdown.")
 
-        contrast_key = contrast_pair
-        gene_selection_key = (
-            tuple(sorted(selected_genes)),
-            contrast_key,
-            hm_csv_order,
-        )
-        if st.session_state.get("_heatmap_gene_key") != gene_selection_key:
-            st.session_state["_heatmap_gene_key"] = gene_selection_key
-            gene_list = list(selected_genes)
+            manual_genes: list = []
+            manual = st.text_input(
+                "✏️ Additional genes (comma-separated, case-insensitive)",
+                placeholder="e.g.  ACTB, GAPDH, TP53",
+            )
+            if manual:
+                for g in manual.split(","):
+                    g = g.strip().upper()
+                    if g:
+                        selected_genes.add(g)
+                        manual_genes.append(g)
+
+            if selected_genes:
+                st.caption(f"**{len(selected_genes)}** unique gene(s) selected.")
+
+            hm_csv_order = st.toggle(
+                "Keep gene order from CSV file(s)",
+                key="hm_csv_order_toggle",
+                help="Rows follow the order genes appear in your selected CSV(s), top to bottom.",
+            )
+            hm_log_tpm = st.toggle(
+                "Show log₂(TPM+1) (instead of per-gene Z-scores)",
+                key="hm_log_tpm_toggle",
+                help="Colour cells by log-transformed TPM without row-wise Z-scoring.",
+            )
+            hm_use_tpm = st.toggle(
+                "Show raw TPM",
+                key="hm_raw_tpm_toggle",
+                help="Colour cells by raw TPM values (overrides log₂ toggle when both are on).",
+            )
+            if hm_use_tpm:
+                hm_value_mode = "tpm"
+            elif hm_log_tpm:
+                hm_value_mode = "log2_tpm"
+            else:
+                hm_value_mode = "zscore"
+
+            # ── Gene row ordering by group contrast ───────────────────────────────
+            group_names = list(groups_dict.keys())
+            contrast_pair = None
             if hm_csv_order:
-                st.session_state["_heatmap_gene_order"] = genes_in_csv_order(
-                    csv_order_genes, gene_list, manual_genes,
-                )
-            elif contrast_pair:
-                st.session_state["_heatmap_gene_order"] = order_gene_list_for_heatmap(
-                    tpm_df, groups_dict, gene_list, contrast_pair,
-                )
-            else:
-                st.session_state["_heatmap_gene_order"] = gene_list
+                st.caption("Gene order follows your CSV row order (contrast sorting is off).")
+            elif len(group_names) >= 2:
+                st.markdown("**📐 Gene row order** — cluster by expression contrast between two groups:")
+                c1, c2 = st.columns(2)
+                with c1:
+                    hm_group1 = st.selectbox(
+                        "Higher at top of heatmap",
+                        options=group_names,
+                        index=0,
+                        key="hm_contrast_g1",
+                    )
+                with c2:
+                    other = [g for g in group_names if g != hm_group1]
+                    hm_group2 = st.selectbox(
+                        "Higher at bottom of heatmap",
+                        options=other if other else group_names,
+                        index=0,
+                        key="hm_contrast_g2",
+                    )
+                if hm_group1 != hm_group2:
+                    contrast_pair = (hm_group1, hm_group2)
+                    st.caption(
+                        f"Genes are sorted by mean log₂(TPM+1): enriched in **{hm_group1}** at the top, "
+                        f"enriched in **{hm_group2}** at the bottom, and similar between groups in the middle."
+                    )
+                else:
+                    st.warning("Pick two different groups for contrast ordering.")
 
-        # ── Gene reordering UI ────────────────────────────────────────────────
-        if selected_genes:
-            st.markdown("**🔀 Manual reorder** (optional) — select a gene and move it up or down:")
+            contrast_key = contrast_pair
+            gene_selection_key = (
+                tuple(sorted(selected_genes)),
+                contrast_key,
+                hm_csv_order,
+            )
+            if st.session_state.get("_heatmap_gene_key") != gene_selection_key:
+                st.session_state["_heatmap_gene_key"] = gene_selection_key
+                gene_list = list(selected_genes)
+                if hm_csv_order:
+                    st.session_state["_heatmap_gene_order"] = genes_in_csv_order(
+                        csv_order_genes, gene_list, manual_genes,
+                    )
+                elif contrast_pair:
+                    st.session_state["_heatmap_gene_order"] = order_gene_list_for_heatmap(
+                        tpm_df, groups_dict, gene_list, contrast_pair,
+                    )
+                else:
+                    st.session_state["_heatmap_gene_order"] = gene_list
 
-            gene_order = st.session_state["_heatmap_gene_order"]
+            # ── Gene reordering UI ────────────────────────────────────────────────
+            if selected_genes:
+                st.markdown("**🔀 Manual reorder** (optional) — select a gene and move it up or down:")
 
-            # Show current order as a small preview — above the buttons
-            with st.expander("📋 Current gene order (top → bottom on heatmap)", expanded=False):
-                for i, g in enumerate(st.session_state["_heatmap_gene_order"]):
-                    st.write(f"{i+1}. {g}")
+                gene_order = st.session_state["_heatmap_gene_order"]
 
-            col_list, col_btns = st.columns([3, 1])
+                # Show current order as a small preview — above the buttons
+                with st.expander("📋 Current gene order (top → bottom on heatmap)", expanded=False):
+                    for i, g in enumerate(st.session_state["_heatmap_gene_order"]):
+                        st.write(f"{i+1}. {g}")
 
-            with col_list:
-                selected_gene = st.selectbox(
-                    "Select gene to move",
-                    options=gene_order,
-                    key="hm_gene_select",
-                    label_visibility="collapsed",
-                )
+                col_list, col_btns = st.columns([3, 1])
 
-            with col_btns:
-                b1, b2, b3 = st.columns(3)
-                move_top  = b1.button("⏫", key="hm_top",  help="Move to top")
-                move_up   = b2.button("⬆",  key="hm_up",   help="Move up one")
-                move_down = b3.button("⬇",  key="hm_down", help="Move down one")
+                with col_list:
+                    selected_gene = st.selectbox(
+                        "Select gene to move",
+                        options=gene_order,
+                        key="hm_gene_select",
+                        label_visibility="collapsed",
+                    )
 
-            if selected_gene and selected_gene in gene_order:
-                idx = gene_order.index(selected_gene)
-                if move_top and idx > 0:
-                    gene_order.insert(0, gene_order.pop(idx))
-                    st.session_state["_heatmap_gene_order"] = gene_order
-                    st.rerun()
-                if move_up and idx > 0:
-                    gene_order[idx], gene_order[idx-1] = gene_order[idx-1], gene_order[idx]
-                    st.session_state["_heatmap_gene_order"] = gene_order
-                    st.rerun()
-                if move_down and idx < len(gene_order) - 1:
-                    gene_order[idx], gene_order[idx+1] = gene_order[idx+1], gene_order[idx]
-                    st.session_state["_heatmap_gene_order"] = gene_order
-                    st.rerun()
+                with col_btns:
+                    b1, b2, b3 = st.columns(3)
+                    move_top  = b1.button("⏫", key="hm_top",  help="Move to top")
+                    move_up   = b2.button("⬆",  key="hm_up",   help="Move up one")
+                    move_down = b3.button("⬇",  key="hm_down", help="Move down one")
 
-        if st.button("🔥 Generate Heatmap", type="primary",
-                     disabled=len(selected_genes) == 0):
-            try:
-                gene_order = st.session_state.get(
-                    "_heatmap_gene_order", list(selected_genes),
-                )
-                fig = build_heatmap(
-                    tpm_df, sample_meta, gene_order,
-                    colors_dict, groups_dict,
-                    value_mode=hm_value_mode,
-                )
-                st.session_state["_heatmap_fig"] = fig
-                st.session_state["_heatmap_settings"] = (hm_value_mode, hm_csv_order)
-            except Exception as e:
-                st.error(f"Heatmap error: {e}")
+                if selected_gene and selected_gene in gene_order:
+                    idx = gene_order.index(selected_gene)
+                    if move_top and idx > 0:
+                        gene_order.insert(0, gene_order.pop(idx))
+                        st.session_state["_heatmap_gene_order"] = gene_order
+                        st.rerun()
+                    if move_up and idx > 0:
+                        gene_order[idx], gene_order[idx-1] = gene_order[idx-1], gene_order[idx]
+                        st.session_state["_heatmap_gene_order"] = gene_order
+                        st.rerun()
+                    if move_down and idx < len(gene_order) - 1:
+                        gene_order[idx], gene_order[idx+1] = gene_order[idx+1], gene_order[idx]
+                        st.session_state["_heatmap_gene_order"] = gene_order
+                        st.rerun()
 
-        # Keep the figure visible after reordering without re-clicking generate
-        if "_heatmap_fig" in st.session_state and selected_genes:
-            if st.session_state.get("_heatmap_settings") != (hm_value_mode, hm_csv_order):
-                st.info("Display options changed — click **Generate Heatmap** to update the plot.")
-            fig = st.session_state["_heatmap_fig"]
-            st.plotly_chart(fig, use_container_width=True)
-            export_buttons(fig, "heatmap", include_pdf=True)
+            if st.button("🔥 Generate Heatmap", type="primary",
+                         disabled=len(selected_genes) == 0):
+                try:
+                    gene_order = st.session_state.get(
+                        "_heatmap_gene_order", list(selected_genes),
+                    )
+                    fig = build_heatmap(
+                        tpm_df, sample_meta, gene_order,
+                        colors_dict, groups_dict,
+                        value_mode=hm_value_mode,
+                    )
+                    st.session_state["_heatmap_fig"] = fig
+                    st.session_state["_heatmap_settings"] = (
+                        hm_value_mode, hm_csv_order, tuple(sorted(hm_selected)),
+                    )
+                except Exception as e:
+                    st.error(f"Heatmap error: {e}")
+
+            # Keep the figure visible after reordering without re-clicking generate
+            if "_heatmap_fig" in st.session_state and selected_genes:
+                current_settings = (hm_value_mode, hm_csv_order, tuple(sorted(hm_selected)))
+                if st.session_state.get("_heatmap_settings") != current_settings:
+                    st.info("Display options changed — click **Generate Heatmap** to update the plot.")
+                fig = st.session_state["_heatmap_fig"]
+                st.plotly_chart(fig, use_container_width=True)
+                export_buttons(fig, "heatmap", include_pdf=True)
 
 
 # ── GO Enrichment ─────────────────────────────────────────────────────────────
