@@ -110,10 +110,22 @@ from src.pca          import compute_pca, plot_pca_2d, plot_pca_3d
 from src.volcano      import plot_volcano
 from src.heatmap      import (
     build_heatmap,
+    exclusive_gene_label_colors,
     genes_in_csv_order,
     order_gene_list_for_heatmap,
 )
-from src.go_enrichment import run_enrichment, plot_go_bars, plot_go_dots, GO_LIBRARIES
+from src.go_enrichment import (
+    run_enrichment,
+    plot_go_bars,
+    plot_go_dots,
+    GO_LIBRARIES,
+    load_go_biological_process_genesets,
+)
+
+
+@st.cache_data(show_spinner="Loading GO Biological Process gene sets…")
+def _cached_go_bp_genesets() -> dict:
+    return load_go_biological_process_genesets()
 
 
 def group_include_checkboxes(
@@ -612,6 +624,8 @@ with tab_heatmap:
             csv_files = sorted(gene_list_dir.glob("*.csv"))
             selected_genes: set = set()
             csv_order_genes: list = []
+            named_lists: list = []
+            chosen_csvs: list = []
 
             if csv_files:
                 chosen_csvs = st.multiselect(
@@ -623,15 +637,59 @@ with tab_heatmap:
                     try:
                         gdf = pd.read_csv(gene_list_dir / f"{csv_name}.csv")
                         col = gdf.columns[0]
+                        csv_genes: list = []
                         for gene in gdf[col].dropna().astype(str).str.strip().str.upper().tolist():
                             if gene:
                                 selected_genes.add(gene)
+                                csv_genes.append(gene)
                                 if gene not in csv_order_genes:
                                     csv_order_genes.append(gene)
+                        named_lists.append((csv_name, csv_genes))
                     except Exception as e:
                         st.warning(f"Could not read {csv_name}.csv: {e}")
             else:
                 st.caption("No CSVs found in gene_lists/. Add gene list CSVs there to use the dropdown.")
+
+            # ── Optional GO Biological Process gene list ──────────────────────────
+            go_lib: dict = {}
+            try:
+                go_lib = _cached_go_bp_genesets()
+            except Exception as e:
+                st.warning(f"Could not load GO Biological Process terms: {e}")
+
+            go_terms = sorted(go_lib.keys()) if go_lib else []
+            go_query = st.text_input(
+                "Search GO Biological Process",
+                placeholder="Type to filter terms, then choose from the dropdown",
+                key="hm_go_search",
+            )
+            filtered_go = go_terms
+            if go_query.strip():
+                q = go_query.strip().lower()
+                filtered_go = [t for t in go_terms if q in t.lower()]
+            go_options = ["— none —"]
+            current_go = st.session_state.get("hm_go_term", "— none —")
+            if current_go not in ("— none —", None) and current_go not in filtered_go and current_go in go_terms:
+                go_options.append(current_go)
+            go_options.extend(filtered_go)
+            chosen_go = st.selectbox(
+                "🧬 GO Biological Process (optional)",
+                options=go_options,
+                index=0,
+                key="hm_go_term",
+                help="Adds this GO:BP gene set as another list. "
+                     "When 2+ lists are selected, exclusive genes are bold and colored; "
+                     "genes in multiple lists stay black and unbolded.",
+            )
+            if chosen_go and chosen_go != "— none —":
+                go_genes = [
+                    str(g).strip().upper()
+                    for g in go_lib.get(chosen_go, [])
+                    if str(g).strip()
+                ]
+                named_lists.append((chosen_go, go_genes))
+                for gene in go_genes:
+                    selected_genes.add(gene)
 
             manual_genes: list = []
             manual = st.text_input(
@@ -645,8 +703,21 @@ with tab_heatmap:
                         selected_genes.add(g)
                         manual_genes.append(g)
 
+            gene_label_colors, list_color_legend = exclusive_gene_label_colors(named_lists)
             if selected_genes:
                 st.caption(f"**{len(selected_genes)}** unique gene(s) selected.")
+            if len(named_lists) >= 2:
+                swatches = " · ".join(
+                    f'<span style="color:{color} !important;font-weight:700">{name}</span>'
+                    for name, color in list_color_legend
+                )
+                st.markdown(
+                    "List colors (genes in more than one list stay black): "
+                    + swatches,
+                    unsafe_allow_html=True,
+                )
+            elif len(named_lists) == 1:
+                st.caption("Select a second list (CSV or GO term) to color exclusive gene names.")
 
             hm_csv_order = st.toggle(
                 "Keep gene order from CSV file(s)",
@@ -705,6 +776,8 @@ with tab_heatmap:
             contrast_key = contrast_pair
             gene_selection_key = (
                 tuple(sorted(selected_genes)),
+                tuple(chosen_csvs),
+                chosen_go if chosen_go != "— none —" else "",
                 contrast_key,
                 hm_csv_order,
             )
@@ -774,6 +847,8 @@ with tab_heatmap:
                         tpm_df, sample_meta, gene_order,
                         colors_dict, groups_dict,
                         value_mode=hm_value_mode,
+                        gene_label_colors=gene_label_colors or None,
+                        list_color_legend=list_color_legend if len(named_lists) >= 2 else None,
                     )
                     st.session_state["_heatmap_fig"] = fig
                     st.session_state["_heatmap_settings"] = (
