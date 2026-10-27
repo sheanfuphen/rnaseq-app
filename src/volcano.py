@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-_FONT = dict(family="Arial, sans-serif", size=12, color="#111111")
+_FONT = dict(family="Arial, sans-serif", size=18, color="#111111")
 
 
 def plot_volcano(
@@ -57,7 +57,7 @@ def plot_volcano(
     plot_df["class"] = plot_df.apply(_classify, axis=1)
 
     palette  = {"up": color_up, "down": color_down, "sig_only": "#aaa", "ns": "#ddd"}
-    sizes    = {"up": 7,        "down": 7,           "sig_only": 5,      "ns": 4}
+    sizes    = {"up": 20,       "down": 20,          "sig_only": 5,      "ns": 4}
     opacs    = {"up": 0.85,     "down": 0.85,        "sig_only": 0.6,    "ns": 0.35}
 
     fig = go.Figure()
@@ -84,7 +84,7 @@ def plot_volcano(
         show_labels = cls in ("up", "down")
         mode = "markers+text" if show_labels else "markers"
         text = sub.index.astype(str) if show_labels else None
-        textfont = dict(family="Arial, sans-serif", size=12, color=palette[cls]) if show_labels else None
+        textfont = dict(family="Arial, sans-serif", size=18, color=palette[cls]) if show_labels else None
 
         fig.add_trace(go.Scatter(
             x=sub["log2FoldChange"],
@@ -96,8 +96,12 @@ def plot_volcano(
             textfont=textfont,
             hovertext=hover,
             hoverinfo="text",
-            marker=dict(color=palette[cls], size=sizes[cls],
-                        opacity=opacs[cls], line=dict(width=0)),
+            marker=dict(
+                color=palette[cls],
+                size=sizes[cls],
+                opacity=opacs[cls],
+                line=dict(width=1 if cls in ("up", "down") else 0, color="black"),
+            ),
         ))
 
     x_range = plot_df["log2FoldChange"].abs().max() * 1.1
@@ -113,16 +117,16 @@ def plot_volcano(
     label_y = y_max * 0.97
     fig.add_annotation(
         x=-x_range * 0.95, y=label_y,
-        text=f"← {group2}",
+        text=f"<b>← {group2}</b>",
         showarrow=False,
-        font=dict(size=12, color=color_down, family="Arial, sans-serif"),
+        font=dict(size=28, color=color_down, family="Arial, sans-serif"),
         xanchor="left",
     )
     fig.add_annotation(
         x=x_range * 0.95, y=label_y,
-        text=f"{group1} →",
+        text=f"<b>{group1} →</b>",
         showarrow=False,
-        font=dict(size=12, color=color_up, family="Arial, sans-serif"),
+        font=dict(size=28, color=color_up, family="Arial, sans-serif"),
         xanchor="right",
     )
 
@@ -135,8 +139,8 @@ def plot_volcano(
                   f"  —  {up_n} up in {group1} · {dn_n} up in {group2}"),
             font=_FONT,
         ),
-        xaxis_title="log₂ Fold Change",
-        yaxis_title="-log₁₀(adjusted p-value)",
+        xaxis_title=dict(text="<b>log₂ Fold Change</b>", font=dict(family="Arial, sans-serif", size=28, color="#111111")),
+        yaxis_title=dict(text="<b>-log₁₀(adjusted p-value)</b>", font=dict(family="Arial, sans-serif", size=28, color="#111111")),
         legend=dict(
             title=dict(text="<b><u>Legend</u></b>", font=_FONT, side="top center"),
             x=1.02,
@@ -155,6 +159,7 @@ def plot_volcano(
         height=700,
         margin=dict(l=70, r=180, t=80, b=70),
         hovermode="closest",
+        hoverlabel=dict(font=dict(family="Arial, sans-serif", size=18)),
         xaxis=dict(range=[-x_range, x_range], showgrid=True,
                    gridcolor="#dddddd", zeroline=True,
                    zerolinecolor="#aaaaaa", zerolinewidth=1,

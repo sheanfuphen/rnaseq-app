@@ -15,6 +15,8 @@ import plotly.graph_objects as go
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
+_FONT = dict(family="Arial, sans-serif", size=18, color="#111111")
+
 
 def compute_pca(
     tpm_df: pd.DataFrame,
@@ -77,28 +79,27 @@ def plot_pca_2d(
             name=group,
             text=sub.index.tolist(),
             textposition="top center",
-            textfont=dict(size=13, color="#111111"),
-            marker=dict(size=14, color=color,
-                        line=dict(width=1.5, color="white"), opacity=0.9),
+            textfont=_FONT,
+            marker=dict(size=20, color=color,
+                        line=dict(width=1, color="black"), opacity=0.9),
         ))
 
     pct = [f"{v*100:.1f}%" for v in explained]
     fig.update_layout(
         xaxis_title=f"PC1 ({pct[0] if pct else ''})",
         yaxis_title=f"PC2 ({pct[1] if len(pct)>1 else ''})",
-        legend_title="Group",
+        legend=dict(title=dict(text="Group", font=_FONT), font=_FONT),
         width=width, height=height,
         plot_bgcolor="#f5f5f5", paper_bgcolor="#ffffff",
-        font=dict(family="DM Sans, sans-serif", size=15, color="#111111"),
+        font=_FONT,
         margin=dict(l=60, r=40, t=50, b=60),
         hovermode="closest",
+        hoverlabel=dict(font=dict(family="Arial, sans-serif", size=18)),
     )
     fig.update_xaxes(showgrid=True, gridcolor="#dddddd", zeroline=False,
-                     tickfont=dict(size=14, color="#111111"),
-                     title_font=dict(size=15, color="#111111"))
+                     tickfont=_FONT, title_font=_FONT)
     fig.update_yaxes(showgrid=True, gridcolor="#dddddd", zeroline=False,
-                     tickfont=dict(size=14, color="#111111"),
-                     title_font=dict(size=15, color="#111111"))
+                     tickfont=_FONT, title_font=_FONT)
     return fig
 
 

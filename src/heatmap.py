@@ -11,9 +11,9 @@ Layout:
 
 from __future__ import annotations
 
-from typing import Dict, List, Literal, Optional, Tuple
+from typing import Dict, Iterable, List, Literal, Optional, Sequence, Tuple
 
-ValueMode = Literal["zscore", "tpm"]
+ValueMode = Literal["zscore", "log2_tpm", "tpm"]
 
 import numpy as np
 import pandas as pd
@@ -22,6 +22,73 @@ from plotly.colors import sample_colorscale
 from plotly.subplots import make_subplots
 
 _FONT = dict(family="Arial, sans-serif", size=12, color="#111111")
+
+# Assigned in list-selection order when 2+ gene lists are shown.
+LIST_LABEL_COLORS = [
+    "#d62728",  # red
+    "#1f77b4",  # blue
+    "#2ca02c",  # green
+    "#ff7f0e",  # orange
+    "#9467bd",  # purple
+    "#17becf",  # cyan
+    "#e377c2",  # pink
+    "#8c564b",  # brown
+]
+
+
+def exclusive_gene_label_colors(
+    named_lists: Sequence[Tuple[str, Iterable[str]]],
+    colors: Sequence[str] = LIST_LABEL_COLORS,
+) -> Tuple[Dict[str, str], List[Tuple[str, str]]]:
+    """
+    Colour gene names that belong to exactly one selected list.
+
+    Coloring is applied only when 2+ lists are selected. Genes in multiple
+    lists (or in none) stay unstyled (black, not bold).
+
+    Returns
+    -------
+    gene_colors : {GENE_UPPER: hex} for exclusive membership
+    legend      : [(list_name, hex), ...] in selection order
+    """
+    lists = [(name, list(genes)) for name, genes in named_lists if name]
+    legend = [
+        (name, colors[i % len(colors)])
+        for i, (name, _) in enumerate(lists)
+    ]
+    if len(lists) < 2:
+        return {}, legend
+
+    membership: Dict[str, set] = {}
+    for i, (_, genes) in enumerate(lists):
+        for gene in genes:
+            gu = str(gene).strip().upper()
+            if gu:
+                membership.setdefault(gu, set()).add(i)
+
+    gene_colors: Dict[str, str] = {}
+    for gu, idxs in membership.items():
+        if len(idxs) == 1:
+            i = next(iter(idxs))
+            gene_colors[gu] = colors[i % len(colors)]
+    return gene_colors, legend
+
+
+def _gene_ticktext(
+    genes: Sequence[str],
+    gene_label_colors: Optional[Dict[str, str]] = None,
+) -> List[str]:
+    """HTML tick labels: exclusive-list genes are bold + list colour."""
+    if not gene_label_colors:
+        return list(genes)
+    texts: List[str] = []
+    for gene in genes:
+        color = gene_label_colors.get(str(gene).upper())
+        if color:
+            texts.append(f'<span style="color:{color}"><b>{gene}</b></span>')
+        else:
+            texts.append(str(gene))
+    return texts
 
 
 def _value_to_fillcolor(
@@ -92,6 +159,31 @@ def order_gene_list_for_heatmap(
     return ordered + not_found
 
 
+def genes_in_csv_order(
+    csv_order: List[str],
+    selected_genes: List[str],
+    manual_genes: Optional[List[str]] = None,
+) -> List[str]:
+    """Preserve CSV row order; append manual genes not already listed."""
+    selected_upper = {g.upper() for g in selected_genes}
+    ordered: List[str] = []
+    seen: set = set()
+    for g in csv_order:
+        gu = g.upper()
+        if gu in selected_upper and gu not in seen:
+            seen.add(gu)
+            ordered.append(gu)
+    for g in manual_genes or []:
+        gu = g.upper().strip()
+        if gu and gu in selected_upper and gu not in seen:
+            seen.add(gu)
+            ordered.append(gu)
+    for g in sorted(selected_upper):
+        if g not in seen:
+            ordered.append(g)
+    return ordered
+
+
 def build_heatmap(
     tpm_df: pd.DataFrame,
     sample_meta: pd.DataFrame,
@@ -99,6 +191,8 @@ def build_heatmap(
     group_colors: Dict[str, str],
     groups: Dict[str, List[str]],
     value_mode: ValueMode = "zscore",
+    gene_label_colors: Optional[Dict[str, str]] = None,
+    list_color_legend: Optional[Sequence[Tuple[str, str]]] = None,
 ) -> go.Figure:
     """
     Parameters
@@ -108,7 +202,9 @@ def build_heatmap(
     gene_list   : genes to display (case-insensitive matching against tpm_df.index)
     group_colors: {group_name: hex_color}  — must match PCA colours
     groups      : {group_name: [sample_key, ...]}  — used for column ordering
-    value_mode  : "zscore" for per-gene Z-scored log₂(TPM+1), or "tpm" for raw TPM
+    value_mode  : "zscore" | "log2_tpm" | "tpm" for cell colours and colorbar
+    gene_label_colors : optional {GENE_UPPER: hex} for exclusive-list Y labels
+    list_color_legend : optional [(list_name, hex)] shown above the heatmap
 
     Returns
     -------
@@ -159,6 +255,13 @@ def build_heatmap(
             vmax = vmin + 1.0
         colorscale = "Viridis"
         colorbar_title = "TPM"
+    elif value_mode == "log2_tpm":
+        vmin = float(log_tpm.values.min()) if log_tpm.size else 0.0
+        vmax = float(log_tpm.values.max()) if log_tpm.size else 1.0
+        if vmax <= vmin:
+            vmax = vmin + 1.0
+        colorscale = "Viridis"
+        colorbar_title = "log₂(TPM+1)"
     else:
         z_abs = float(np.nanmax(np.abs(z.values))) if z.size else 1.0
         z_abs = max(z_abs, 0.01)
@@ -176,7 +279,12 @@ def build_heatmap(
             log_val = float(log_tpm.loc[gene, samp])
             zval    = float(z.loc[gene, samp])
             grp     = sample_meta.loc[samp, "group"] if samp in sample_meta.index else "?"
-            cell_val = raw_tpm if value_mode == "tpm" else zval
+            if value_mode == "tpm":
+                cell_val = raw_tpm
+            elif value_mode == "log2_tpm":
+                cell_val = log_val
+            else:
+                cell_val = zval
             fig.add_shape(
                 type="rect",
                 x0=si - 0.5,
@@ -290,7 +398,7 @@ def build_heatmap(
             y=0.97,
             font=_FONT,
         ),
-        margin=dict(l=130, r=120, t=40, b=20),
+        margin=dict(l=130, r=120, t=70 if list_color_legend and len(list_color_legend) >= 2 else 40, b=20),
         dragmode="pan",
     )
 
@@ -311,9 +419,9 @@ def build_heatmap(
     fig.update_yaxes(
         range=[-0.5, n_genes - 0.5],
         tickvals=list(range(n_genes)),
-        ticktext=matched,
+        ticktext=_gene_ticktext(matched, gene_label_colors),
         title_text="Gene",
-        tickfont=_FONT,
+        tickfont=dict(family="Arial, sans-serif", size=12) if gene_label_colors else _FONT,
         title_font=_FONT,
         autorange="reversed",
         fixedrange=False,
@@ -350,6 +458,20 @@ def build_heatmap(
     # Disable axis baselines on every subplot (avoids lines at x=0 / y=0 in SVG)
     fig.update_xaxes(zeroline=False, showline=False, mirror=False, showgrid=False)
     fig.update_yaxes(zeroline=False, showline=False, mirror=False, showgrid=False)
+
+    if list_color_legend and len(list_color_legend) >= 2:
+        legend_html = " · ".join(
+            f'<span style="color:{color}"><b>{name}</b></span>'
+            for name, color in list_color_legend
+        )
+        fig.add_annotation(
+            text=legend_html,
+            xref="paper", yref="paper",
+            x=0, y=1.04,
+            showarrow=False,
+            font=dict(family="Arial, sans-serif", size=12, color="#111111"),
+            xanchor="left",
+        )
 
     # ── Warning for unmatched genes ───────────────────────────────────────────
     if missing:

@@ -29,6 +29,23 @@ GO_LIBRARIES = {
     "MSigDB Hallmarks":      "MSigDB_Hallmark_2020",
 }
 
+GO_BP_LIBRARY = GO_LIBRARIES["GO Biological Process"]
+
+
+def load_go_biological_process_genesets() -> Dict[str, List[str]]:
+    """
+    Download (or reuse the local Enrichr cache of) GO Biological Process
+    gene sets. Returns {term_name: [gene, ...]}.
+    """
+    import gseapy as gp
+
+    return gp.get_library(
+        name=GO_BP_LIBRARY,
+        organism="Human",
+        min_size=0,
+        max_size=100_000,
+    )
+
 
 def run_enrichment(
     gene_list: List[str],
